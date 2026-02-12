@@ -1,0 +1,22 @@
+# ---- build ----
+FROM rust:1.78 AS builder
+WORKDIR /app
+
+# caching
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && echo "fn main(){}" > src/main.rs
+RUN cargo build --release || true
+
+# actual build
+COPY src ./src
+RUN cargo build --release
+
+# ---- run ----
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+
+COPY --from=builder /app/target/release/docops-api /app/docops-api
+
+EXPOSE 8080
+CMD ["/app/docops-api"]
