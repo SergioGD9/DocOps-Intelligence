@@ -1,0 +1,121 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: docops_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - ../data/postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: docops_redis
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - ../data/redis:/data
+
+  minio:
+    image: minio/minio:latest
+    container_name: docops_minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - ../data/minio:/data
+
+  # Crea el bucket "docops" automáticamente
+  minio_init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do
+        echo 'waiting for minio...'; sleep 2;
+      done;
+      mc mb -p local/${S3_BUCKET} || true;
+      mc anonymous set download local/${S3_BUCKET} || true;
+      echo 'minio bucket ready';
+      "
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: docops_qdrant
+    ports:
+      - "${QDRANT_HTTP_PORT}:6333"
+    volumes:
+      - ../data/qdrant:/qdrant/storage
+
+  api:
+    build:
+      context: ../services/api-rust
+    container_name: docops_api
+    depends_on:
+      - postgres
+      - redis
+      - minio_init
+      - qdrant
+    environment:
+      RUST_LOG: ${RUST_LOG}
+      SERVER_ADDR: 0.0.0.0:8080
+      POSTGRES_URL: ${POSTGRES_URL}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_REGION: ${S3_REGION}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      REDIS_URL: ${REDIS_URL}
+      AI_SERVICE_URL: ${AI_SERVICE_URL}
+    ports:
+      - "${API_PORT}:8080"
+
+  ai:
+    build:
+      context: ../services/ai-python
+    container_name: docops_ai
+    depends_on:
+      - redis
+      - qdrant
+    environment:
+      AI_HOST: 0.0.0.0
+      AI_PORT: 8000
+      DOCOPS_API_URL: ${DOCOPS_API_URL}
+      REDIS_URL: ${REDIS_URL}
+      REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME}
+      QDRANT_URL: ${QDRANT_URL}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+    ports:
+      - "${AI_PORT}:8000"
+
+  worker:
+    build:
+      context: ../services/ai-python
+    container_name: docops_worker
+    depends_on:
+      - redis
+      - qdrant
+      - ai
+    environment:
+      DOCOPS_API_URL: ${DOCOPS_API_URL}
+      REDIS_URL: ${REDIS_URL}
+      REDIS_QUEUE_NAME: ${REDIS_QUEUE_NAME}
+      QDRANT_URL: ${QDRANT_URL}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+    command: ["python", "-c", "from app.queue_worker import run_worker; run_worker()"]
